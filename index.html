@@ -1,0 +1,771 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Cemre Ece Kırcalı | English Language Instructor & Applied Linguist</title>
+    <!-- Load Tailwind CSS -->
+    <script src="https://cdn.tailwindcss.com"></script>
+    <!-- Firebase Imports -->
+    <script type="module">
+        import { initializeApp } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-app.js";
+        import { getAuth, signInAnonymously, signInWithCustomToken, onAuthStateChanged } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-auth.js";
+        import { getFirestore, collection, query, orderBy, onSnapshot, setDoc, doc, Timestamp, getDocs, setLogLevel } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-firestore.js";
+        
+        // Expose Firebase objects globally for use in the script tag
+        window.firebase = {
+            initializeApp, getAuth, signInAnonymously, signInWithCustomToken, onAuthStateChanged,
+            getFirestore, collection, query, orderBy, onSnapshot, setDoc, doc, Timestamp, getDocs, setLogLevel
+        };
+    </script>
+    <style>
+        /* Custom font import (Inter) */
+        @import url('https://fonts.googleapis.com/css2?family=Inter:wght@100..900&display=swap');
+        
+        /* --- START: COLOR PALETTE (Cool Tones) --- */
+        /* Primary Color: Deep Indigo/Blue (#1e3a8a) */
+        /* Accent Color: Vibrant Turquoise/Cyan (#06b6d4) */
+        
+        body {
+            font-family: 'Inter', sans-serif;
+            background-color: #f7f9fb; /* Light background for a clean look */
+            color: #1f2937; /* Dark gray text */
+        }
+        .header-section {
+            background-color: #ffffff;
+            box-shadow: 0 1px 3px rgba(0, 0, 0, 0.05);
+        }
+        .section-header {
+            color: #1e3a8a; /* Deep Indigo for headings */
+            border-bottom: 3px solid #06b6d4; /* Turquoise accent border */
+            display: inline-block;
+            padding-bottom: 0.25rem;
+        }
+        .accent-text {
+            color: #06b6d4; /* Turquoise accent */
+        }
+        .card {
+            background-color: #ffffff;
+            border-radius: 0.75rem; /* Rounded corners */
+            box-shadow: 0 4px 6px rgba(0, 0, 0, 0.05);
+            transition: transform 0.3s ease;
+        }
+        .card:hover {
+            transform: translateY(-3px);
+            box-shadow: 0 6px 10px rgba(0, 0, 0, 0.1);
+        }
+        .experience-item {
+            border-left: 3px solid #1e3a8a; /* Deep Indigo timeline */
+            padding-left: 1.5rem;
+            position: relative;
+        }
+        .experience-item::before {
+            content: '';
+            position: absolute;
+            left: -8px;
+            top: 0.5rem;
+            width: 16px;
+            height: 16px;
+            background-color: #06b6d4; /* Turquoise dot */
+            border-radius: 50%;
+            border: 3px solid #1e3a8a; /* Deep Indigo ring */
+        }
+        /* Chat bubble styles */
+        .user-message {
+            background-color: #e0f2fe; /* Light blue */
+            border-radius: 0.75rem 0.75rem 0 0.75rem;
+            align-self: flex-end;
+        }
+        .coach-message {
+            background-color: #ffffff; /* White card background */
+            border: 1px solid #e0e7ff; /* Very light indigo border */
+            border-radius: 0.75rem 0.75rem 0.75rem 0;
+            align-self: flex-start;
+        }
+        /* Blog post specific styles */
+        .blog-post {
+            border-bottom: 1px solid #e5e7eb;
+        }
+        .blog-post:last-child {
+            border-bottom: none;
+        }
+        /* --- END: COLOR PALETTE (Cool Tones) --- */
+    </style>
+    <script>
+        // --- START: CONFIGURATION & UTILITIES ---
+
+        // API Configuration
+        const GEMINI_API_URL = "https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash-preview-05-20:generateContent";
+        const apiKey = ""; 
+        
+        // Firebase Globals
+        let db;
+        let auth;
+        let userId = 'unknown'; // Will be set after auth
+        const appId = typeof __app_id !== 'undefined' ? __app_id : 'default-app-id';
+
+        // State for chat history and blog posts
+        let chatHistory = [];
+
+        // Smooth scroll function for navigation
+        function smoothScroll(targetId) {
+            const targetElement = document.getElementById(targetId);
+            if (targetElement) {
+                targetElement.scrollIntoView({ behavior: 'smooth' });
+            }
+        }
+
+        // Simple mobile menu toggle
+        function toggleMenu() {
+            const menu = document.getElementById('mobile-menu');
+            menu.classList.toggle('hidden');
+        }
+
+        // Exponential backoff retry utility for API calls
+        async function fetchWithRetry(url, options, maxRetries = 5) {
+            let attempt = 0;
+            while (attempt < maxRetries) {
+                try {
+                    const response = await fetch(url, options);
+                    if (!response.ok) {
+                        throw new Error(`HTTP error! status: ${response.status}`);
+                    }
+                    return response;
+                } catch (error) {
+                    console.error(`Attempt ${attempt + 1} failed:`, error);
+                    attempt++;
+                    if (attempt >= maxRetries) {
+                        throw error;
+                    }
+                    // Exponential backoff: 2^attempt * 1000ms
+                    const delay = Math.pow(2, attempt) * 1000;
+                    await new Promise(resolve => setTimeout(resolve, delay));
+                }
+            }
+        }
+
+        // --- END: CONFIGURATION & UTILITIES ---
+        
+        // --- START: FIREBASE & BLOG LOGIC ---
+
+        window.onload = async function() {
+            if (typeof firebase === 'undefined') {
+                console.error("Firebase module failed to load.");
+                return;
+            }
+            
+            try {
+                // Initialize Firebase
+                const firebaseConfig = JSON.parse(typeof __firebase_config !== 'undefined' ? __firebase_config : '{}');
+                const app = firebase.initializeApp(firebaseConfig);
+                db = firebase.getFirestore(app);
+                auth = firebase.getAuth(app);
+                firebase.setLogLevel('Debug'); // Enable Firestore logging
+
+                // 1. Authenticate user
+                const initialAuthToken = typeof __initial_auth_token !== 'undefined' ? __initial_auth_token : null;
+                if (initialAuthToken) {
+                    await firebase.signInWithCustomToken(auth, initialAuthToken);
+                } else {
+                    await firebase.signInAnonymously(auth);
+                }
+
+                // 2. Set up Auth State Listener
+                firebase.onAuthStateChanged(auth, (user) => {
+                    if (user) {
+                        userId = user.uid;
+                        console.log("User authenticated:", userId);
+                        // Start listening for blog posts once authenticated
+                        getBlogPosts();
+                    } else {
+                        console.log("User signed out or anonymous.");
+                        // Fallback user ID if sign-in fails
+                        userId = 'anon-' + crypto.randomUUID(); 
+                        getBlogPosts(); 
+                    }
+                });
+
+            } catch (error) {
+                console.error("Firebase Initialization or Auth Failed:", error);
+            }
+        }
+
+        /**
+         * Fetches blog posts in real-time using onSnapshot.
+         */
+        function getBlogPosts() {
+            const postsRef = firebase.collection(db, `/artifacts/${appId}/public/data/blog_posts`);
+            // Order by date, newest first
+            const q = firebase.query(postsRef, firebase.orderBy("date", "desc"));
+            
+            firebase.onSnapshot(q, async (querySnapshot) => {
+                const posts = [];
+                querySnapshot.forEach((doc) => {
+                    posts.push({ id: doc.id, ...doc.data() });
+                });
+                
+                renderBlogPosts(posts);
+
+                // If no posts are found, add a sample post for demonstration
+                if (posts.length === 0 && userId && userId !== 'unknown') {
+                    await addInitialPost();
+                }
+            }, (error) => {
+                console.error("Error fetching blog posts:", error);
+                document.getElementById('blogPostsContainer').innerHTML = '<p class="text-red-500">Failed to load blog content. Check console for details.</p>';
+            });
+        }
+        
+        /**
+         * Renders the list of blog posts to the UI.
+         */
+        function renderBlogPosts(posts) {
+            const container = document.getElementById('blogPostsContainer');
+            container.innerHTML = ''; // Clear previous content
+
+            if (posts.length === 0) {
+                container.innerHTML = '<p class="text-gray-500 italic p-6">No blog posts found yet. A sample post will be added shortly for demonstration.</p>';
+                return;
+            }
+
+            posts.forEach(post => {
+                const date = post.date && post.date.toDate ? post.date.toDate().toLocaleDateString('en-US', { year: 'numeric', month: 'long', day: 'numeric' }) : 'N/A';
+                
+                const postHTML = `
+                    <article class="blog-post p-6">
+                        <h3 class="text-2xl font-bold text-[#1e3a8a] mb-2">${post.title}</h3>
+                        <p class="text-sm text-gray-500 mb-4">
+                            Posted by ${post.author || 'Cemre Ece Kırcalı'} on <span class="accent-text">${date}</span>
+                        </p>
+                        <p class="text-gray-700 mb-4 whitespace-pre-wrap">${post.content}</p>
+                        <a href="#contact" onclick="smoothScroll('contact')" class="text-[#06b6d4] hover:text-[#1e3a8a] font-semibold text-sm transition duration-150">
+                            Read More & Discuss Services &rarr;
+                        </a>
+                    </article>
+                `;
+                container.insertAdjacentHTML('beforeend', postHTML);
+            });
+        }
+        
+        /**
+         * Adds a single, relevant sample post to the database if the collection is empty.
+         */
+        async function addInitialPost() {
+            console.log("Adding initial sample blog post.");
+            const postsRef = firebase.collection(db, `/artifacts/${appId}/public/data/blog_posts`);
+            
+            const initialPostData = {
+                title: "Curriculum Design: Bridging Linguistics and EAP Needs",
+                content: "Effective English for Academic Purposes (EAP) curriculum requires more than just textbook selection—it demands a linguistic-informed approach. My background in psycholinguistics allows me to design materials that anticipate and address the cognitive processing challenges inherent to Turkish learners. This means focusing heavily on areas like article usage and relative clause formation, structures often difficult due to Turkish's agglutinative and pro-drop nature. By integrating these specific linguistic insights into the curriculum and e-learning modules, we ensure higher transferability and retention rates for students transitioning to English-medium instruction.",
+                date: firebase.Timestamp.now(),
+                author: "Cemre Ece Kırcalı",
+                userId: userId // Stored for security rules compliance
+            };
+
+            try {
+                // Using setDoc with a specific ID based on a UUID to ensure a unique key
+                await firebase.setDoc(firebase.doc(postsRef, 'sample-post-1'), initialPostData);
+                console.log("Initial post successfully added.");
+            } catch (e) {
+                console.error("Error adding initial document: ", e);
+            }
+        }
+        
+        // --- END: FIREBASE & BLOG LOGIC ---
+
+        // --- START: GEMINI API LOGIC (Existing Features) ---
+
+        /**
+         * Uses the Gemini API to explain a complex linguistic term clearly and concisely.
+         */
+        async function explainLinguisticTerm() {
+            const termInput = document.getElementById('linguisticTermInput');
+            const resultDiv = document.getElementById('linguisticExplanation');
+            const explainButton = document.getElementById('explainButton');
+            const term = termInput.value.trim();
+
+            if (!term) {
+                resultDiv.innerHTML = '<p class="text-red-500">Please enter a linguistic term or concept!</p>';
+                return;
+            }
+
+            // Set loading state
+            resultDiv.innerHTML = `
+                <div class="flex items-center space-x-2 text-[#1e3a8a]">
+                    <svg class="animate-spin h-5 w-5" xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24">
+                        <circle class="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" stroke-width="4"></circle>
+                        <path class="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z"></path>
+                    </svg>
+                    <span>Generating expert explanation...</span>
+                </div>
+            `;
+            explainButton.disabled = true;
+
+            const systemPrompt = `You are a highly knowledgeable Applied Linguist and Psycholinguistics expert. Your task is to explain complex linguistic and psycholinguistic concepts simply and clearly, suitable for an educated but non-specialist audience. Keep the explanation concise, no more than 150 words.`;
+            const userQuery = `Explain the following linguistic concept: "${term}"`;
+
+            const payload = {
+                contents: [{ parts: [{ text: userQuery }] }],
+                systemInstruction: {
+                    parts: [{ text: systemPrompt }]
+                },
+            };
+
+            try {
+                const response = await fetchWithRetry(`${GEMINI_API_URL}?key=${apiKey}`, {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify(payload)
+                });
+
+                const result = await response.json();
+                const generatedText = result.candidates?.[0]?.content?.parts?.[0]?.text || "Sorry, I couldn't generate an explanation right now. Please try a different term.";
+                
+                // Format the output
+                resultDiv.innerHTML = `
+                    <div class="p-4 bg-gray-50 border border-gray-200 rounded-lg">
+                        <p class="text-sm font-semibold text-[#1e3a8a] mb-2">Explanation for "${term}":</p>
+                        <p class="text-gray-700">${generatedText}</p>
+                    </div>
+                `;
+
+            } catch (error) {
+                console.error("Gemini API call failed:", error);
+                resultDiv.innerHTML = '<p class="text-red-500">Error: Failed to connect to the explanation service. Please check your network or try again later.</p>';
+            } finally {
+                explainButton.disabled = false;
+            }
+        }
+
+        /**
+         * Handles sending the user's query to the LLM coach and updates the chat UI.
+         */
+        async function sendCoachQuery() {
+            const inputElement = document.getElementById('coachInput');
+            const responseDiv = document.getElementById('coachResponse');
+            const sendButton = document.getElementById('sendCoachQuery');
+            const userText = inputElement.value.trim();
+
+            if (!userText) return;
+
+            // 1. Add user message to history and UI
+            chatHistory.push({ role: "user", parts: [{ text: userText }] });
+            updateChatUI(responseDiv);
+
+            // Clear input and disable button
+            inputElement.value = '';
+            sendButton.disabled = true;
+            responseDiv.scrollTop = responseDiv.scrollHeight; // Scroll to bottom
+
+            // 2. Display loading indicator
+            const loadingHtml = `
+                <div id="loadingIndicator" class="coach-message p-3 max-w-xs mb-3 text-sm text-gray-500">
+                    <div class="flex items-center space-x-2">
+                        <svg class="animate-spin h-4 w-4 text-[#1e3a8a]" xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24">
+                            <circle class="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" stroke-width="4"></circle>
+                            <path class="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z"></path>
+                        </svg>
+                        <span>Cemre is typing...</span>
+                    </div>
+                </div>
+            `;
+            responseDiv.insertAdjacentHTML('beforeend', loadingHtml);
+            responseDiv.scrollTop = responseDiv.scrollHeight; 
+
+            const systemPrompt = `You are Cemre Ece Kırcalı, an experienced and encouraging English Language Instructor at a top Turkish university with a Master's in Linguistics. Your goal is to help Turkish students improve their English grammar, vocabulary, pronunciation (explain word sounds), and overall communication. Responses should be warm, clear, and specifically address challenges common to Turkish native speakers (e.g., using 'a/an/the,' 'to be,' word order, consonant clusters). Explain the mistake or concept, provide the correct structure, and offer an encouraging follow-up. Keep the response to 4-5 sentences max. Use Turkish briefly only for clarification when absolutely necessary, but respond primarily in fluent English.`;
+            
+            const payload = {
+                contents: chatHistory,
+                systemInstruction: {
+                    parts: [{ text: systemPrompt }]
+                },
+            };
+
+            try {
+                const response = await fetchWithRetry(`${GEMINI_API_URL}?key=${apiKey}`, {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify(payload)
+                });
+
+                const result = await response.json();
+                // FIX: Corrected typo 'parts?Р[0]' to 'parts?.[0]'
+                const coachResponseText = result.candidates?.[0]?.content?.parts?.[0]?.text || "Sorry, I encountered an issue. Please try again with a different question.";
+                
+                // 3. Add coach response to history
+                chatHistory.push({ role: "model", parts: [{ text: coachResponseText }] });
+
+            } catch (error) {
+                console.error("Gemini API call failed:", error);
+                const errorMessage = "Error: Communication failure. Please check your connection and try again.";
+                chatHistory.push({ role: "model", parts: [{ text: errorMessage }] });
+            } finally {
+                // 4. Remove loading indicator and update final UI
+                const loader = document.getElementById('loadingIndicator');
+                if (loader) loader.remove();
+                updateChatUI(responseDiv);
+                sendButton.disabled = false;
+                responseDiv.scrollTop = responseDiv.scrollHeight; // Scroll to bottom
+            }
+        }
+
+        /**
+         * Renders the current chat history to the UI.
+         */
+        function updateChatUI(responseDiv) {
+            responseDiv.innerHTML = '';
+            chatHistory.forEach(msg => {
+                const messageClass = msg.role === 'user' ? 'user-message ml-auto' : 'coach-message';
+                const senderName = msg.role === 'user' ? 'You' : 'Coach Cemre';
+                const messageText = msg.parts[0].text;
+                
+                const messageHtml = `
+                    <div class="flex flex-col mb-3 ${msg.role === 'user' ? 'items-end' : 'items-start'}">
+                        <span class="text-xs text-gray-500 mb-1 px-1">${senderName}</span>
+                        <div class="${messageClass} p-3 max-w-sm">
+                            <p class="text-sm text-gray-800 whitespace-pre-wrap">${messageText}</p>
+                        </div>
+                    </div>
+                `;
+                responseDiv.insertAdjacentHTML('beforeend', messageHtml);
+            });
+        }
+        
+        // --- END: GEMINI API LOGIC (Existing Features) ---
+    </script>
+</head>
+<body class="antialiased">
+
+    <!-- Navigation Bar -->
+    <header class="header-section sticky top-0 z-50">
+        <nav class="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8">
+            <div class="flex items-center justify-between h-16">
+                <!-- Logo/Name -->
+                <div class="flex-shrink-0">
+                    <a href="#" class="text-xl font-extrabold text-[#1e3a8a]">Cemre Ece Kırcalı</a>
+                </div>
+
+                <!-- Desktop Menu -->
+                <div class="hidden md:block">
+                    <div class="ml-10 flex items-baseline space-x-4">
+                        <button onclick="smoothScroll('about')" class="text-[#1f2937] hover:text-[#06b6d4] px-3 py-2 rounded-md text-sm font-medium transition duration-150">About</button>
+                        <button onclick="smoothScroll('coach')" class="text-[#1f2937] hover:text-[#06b6d4] px-3 py-2 rounded-md text-sm font-medium transition duration-150">Coach Demo</button>
+                        <button onclick="smoothScroll('blog')" class="text-[#1f2937] hover:text-[#06b6d4] px-3 py-2 rounded-md text-sm font-medium transition duration-150">Blog</button>
+                        <button onclick="smoothScroll('experience')" class="text-[#1f2937] hover:text-[#06b6d4] px-3 py-2 rounded-md text-sm font-medium transition duration-150">Experience</button>
+                        <button onclick="smoothScroll('research')" class="text-[#1f2937] hover:text-[#06b6d4] px-3 py-2 rounded-md text-sm font-medium transition duration-150">Research</button>
+                        <button onclick="smoothScroll('contact')" class="bg-[#06b6d4] text-white hover:bg-opacity-80 px-4 py-2 rounded-md text-sm font-medium transition duration-150 shadow-md">Contact</button>
+                    </div>
+                </div>
+
+                <!-- Mobile Menu Button -->
+                <div class="-mr-2 flex md:hidden">
+                    <button type="button" onclick="toggleMenu()" class="inline-flex items-center justify-center p-2 rounded-md text-[#1e3a8a] hover:text-white hover:bg-[#1e3a8a] focus:outline-none transition duration-150" aria-controls="mobile-menu" aria-expanded="false">
+                        <!-- Menu icon (Hamburger) -->
+                        <svg class="block h-6 w-6" xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" stroke="currentColor" aria-hidden="true">
+                            <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 6h16M4 12h16M4 18h16" />
+                        </svg>
+                        <!-- Close icon (X) - hidden by default but good practice to include -->
+                        <svg class="hidden h-6 w-6" xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" stroke="currentColor" aria-hidden="true">
+                            <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M6 18L18 6M6 6l12 12" />
+                        </svg>
+                    </button>
+                </div>
+            </div>
+        </nav>
+
+        <!-- Mobile Menu -->
+        <div class="md:hidden hidden" id="mobile-menu">
+            <div class="px-2 pt-2 pb-3 space-y-1 sm:px-3">
+                <button onclick="smoothScroll('about'); toggleMenu();" class="text-[#1f2937] hover:text-[#06b6d4] block px-3 py-2 rounded-md text-base font-medium w-full text-left">About</button>
+                <button onclick="smoothScroll('coach'); toggleMenu();" class="text-[#1f2937] hover:text-[#06b6d4] block px-3 py-2 rounded-md text-base font-medium w-full text-left">Coach Demo</button>
+                <button onclick="smoothScroll('blog'); toggleMenu();" class="text-[#1f2937] hover:text-[#06b6d4] block px-3 py-2 rounded-md text-base font-medium w-full text-left">Blog</button>
+                <button onclick="smoothScroll('experience'); toggleMenu();" class="text-[#1f2937] hover:text-[#06b6d4] block px-3 py-2 rounded-md text-base font-medium w-full text-left">Experience</button>
+                <button onclick="smoothScroll('research'); toggleMenu();" class="text-[#1f2937] hover:text-[#06b6d4] block px-3 py-2 rounded-md text-base font-medium w-full text-left">Research</button>
+                <button onclick="smoothScroll('contact'); toggleMenu();" class="bg-[#06b6d4] text-white block px-3 py-2 rounded-md text-base font-medium w-full text-left mt-2">Contact</button>
+            </div>
+        </div>
+    </header>
+
+    <main class="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 py-12">
+
+        <!-- 1. Hero / About Section -->
+        <section id="about" class="grid md:grid-cols-3 gap-12 items-center mb-12">
+            <!-- Professional Photo (Moved to top on mobile, right on desktop) -->
+            <div class="md:col-span-1 flex justify-center order-first md:order-last mb-6 md:mb-0">
+                <div class="w-64 h-64 flex items-center justify-center overflow-hidden shadow-2xl rounded-full border-4 border-white transition duration-300 hover:shadow-indigo-400/50">
+                    <img src="data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAQAAAAEACAYAAABccqhmAAAACXBIWXMAAAsTAAALEwEAmpwYAAAFmUlEQVR4nO3dy27bSBQG4M1D4h0G1W9J2h6k+qX2K2N/y/xP8w8S/y7u/s0H4+T0k1JzS6oK8B/u772+16/b/A0gAAAABJRU5ErkJggg==~uploaded:unnamed.png-dfe1d11d-876d-4916-a96d-56520acdabf9" 
+                         alt="Cemre Ece Kırcalı Professional Profile Picture" 
+                         class="w-full h-full object-cover"/>
+                </div>
+            </div>
+            
+            <div class="md:col-span-2 space-y-6 order-last md:order-first">
+                <h1 class="text-5xl sm:text-6xl font-extrabold text-[#1e3a8a] leading-tight">
+                    <span class="block">Cemre Ece Kırcalı</span>
+                    <span class="block text-3xl sm:text-4xl accent-text mt-2">English Language Instructor & Applied Linguist</span>
+                </h1>
+                
+                <p class="text-lg text-gray-600">
+                    I am a dedicated **English Language Instructor** with a strong academic foundation, holding an **MA in Linguistics** from Ankara University. Currently, I serve as an Instructor at the Prep School of **Bilkent University**. My approach to language education is informed by my background in **psycholinguistics**, where I investigated the syntactic and prosodic effects on the processing of Turkish quantifiers.
+                </p>
+                <p class="text-lg text-gray-600">
+                    I am **goal-oriented**, **self-taught**, and committed to **adaptability** and **organization** in both dynamic teaching environments and rigorous research settings. I thrive on collective work and constantly seek professional development, including recently obtaining my **CELTA** certification.
+                </p>
+                <!-- Quick Contact Button -->
+                <a href="#contact" onclick="smoothScroll('contact')" class="inline-block bg-[#1e3a8a] text-white px-8 py-3 rounded-full text-lg font-semibold hover:bg-[#06b6d4] hover:text-[#1e3a8a] transition duration-300 shadow-xl hover:shadow-lg">Get in Touch</a>
+            </div>
+            
+        </section>
+
+        <hr class="border-gray-300 my-12">
+        
+        <!-- 2. Interactive Teaching Demo Section -->
+        <section id="coach" class="mb-24">
+            <h2 class="text-4xl font-bold section-header mb-8">Interactive Teaching Demo</h2>
+            <div class="card p-6 border-t-4 border-[#06b6d4]">
+                <h3 class="text-2xl font-semibold text-[#1e3a8a] mb-4 flex items-center">
+                    English Coach for Turkish Students 🗣️
+                </h3>
+                <p class="text-gray-600 mb-4">
+                    Test out my teaching style! Ask any English grammar, vocabulary, or speaking question. I'll provide clear, encouraging feedback tailored to challenges a Turkish speaker might face. Try correcting a sentence, asking about the difference between *since* and *for*, or checking your pronunciation of a word!
+                </p>
+
+                <!-- Chat Display Area -->
+                <div id="coachResponse" class="h-80 overflow-y-auto bg-gray-50 p-4 mb-4 rounded-lg flex flex-col space-y-3">
+                    <div class="coach-message p-3 max-w-sm mb-3 text-sm text-gray-500 rounded-lg">
+                        <p class="text-gray-700">Hello! I'm Coach Cemre. I'm here to help you practice and improve your English. What would you like to work on today? Feel free to ask a question or give me a sentence to check!</p>
+                    </div>
+                </div>
+
+                <!-- Input and Send Button -->
+                <div class="flex space-x-3">
+                    <input type="text" id="coachInput" placeholder="Ask your question or type a sentence to correct..."
+                        class="flex-grow p-3 border border-gray-300 rounded-md focus:outline-none focus:ring-2 focus:ring-[#06b6d4] transition duration-150"
+                        onkeydown="if(event.key === 'Enter') sendCoachQuery()">
+                    
+                    <button id="sendCoachQuery" onclick="sendCoachQuery()"
+                            class="bg-[#1e3a8a] text-white px-6 py-3 rounded-md font-semibold hover:bg-[#06b6d4] transition duration-300 shadow-lg flex-shrink-0 disabled:opacity-50">
+                        Send
+                    </button>
+                </div>
+            </div>
+        </section>
+
+        <hr class="border-gray-300 my-16">
+        
+        <!-- 3. Professional Insights Blog (NEW) -->
+        <section id="blog" class="mb-24">
+            <h2 class="text-4xl font-bold section-header mb-8">Professional Insights Blog</h2>
+            <p class="text-lg text-gray-600 mb-8">
+                Explore my expertise in **Curriculum Development, E-learning Design, and Material Creation** for TEFL, ESL, and EAP contexts. This content demonstrates the linguistic and pedagogical rationale behind my consulting services.
+            </p>
+
+            <div id="blogPostsContainer" class="card divide-y divide-gray-100 min-h-[200px] flex flex-col justify-center items-center">
+                <!-- Blog posts will be rendered here by JavaScript from Firestore -->
+                <div class="flex items-center space-x-2 text-[#1e3a8a] p-12">
+                    <svg class="animate-spin h-5 w-5" xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24">
+                        <circle class="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" stroke-width="4"></circle>
+                        <path class="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z"></path>
+                    </svg>
+                    <span>Loading professional insights...</span>
+                </div>
+            </div>
+        </section>
+
+        <hr class="border-gray-300 my-16">
+
+        <!-- 4. Experience Section (Moved down) -->
+        <section id="experience" class="mb-24">
+            <h2 class="text-4xl font-bold section-header mb-12">Professional Experience</h2>
+            
+            <div class="grid grid-cols-1 md:grid-cols-2 gap-10">
+                <!-- Current Role -->
+                <div class="card p-6 experience-item">
+                    <h3 class="text-xl font-semibold text-[#1e3a8a]">English Language Instructor</h3>
+                    <p class="text-lg accent-text">Bilkent University, Prep School</p>
+                    <p class="text-sm text-gray-500 mb-4">2023 - Present | Ankara, Turkey</p>
+                    <p class="text-gray-700">Providing high-quality English language instruction and contributing to the academic success of students in the preparatory program.</p>
+                </div>
+
+                <!-- Previous Role 1 -->
+                <div class="card p-6 experience-item">
+                    <h3 class="text-xl font-semibold text-[#1e3a8a]">Instructor, Level Coordinator</h3>
+                    <p class="text-lg accent-text">Lokman Hekim University, Foreign Languages Department</p>
+                    <p class="text-sm text-gray-500 mb-4">2022 - 2023</p>
+                    <p class="text-gray-700">Managed instructional levels and taught various English courses, combining teaching duties with administrative oversight.</p>
+                </div>
+                
+                <!-- Previous Role 2 -->
+                <div class="card p-6 experience-item">
+                    <h3 class="text-xl font-semibold text-[#1e3a8a]">Instructor</h3>
+                    <p class="text-lg accent-text">Başkent University, Department of Foreign Languages</p>
+                    <p class="text-sm text-gray-500 mb-4">Feb 2022 - Jun 2022</p>
+                    <p class="text-gray-700">Contributed to the department's language programs as a dedicated instructor.</p>
+                </div>
+
+                <!-- Previous Role 3 -->
+                <div class="card p-6 experience-item">
+                    <h3 class="text-xl font-semibold text-[#1e3a8a]">Graduate Student Assistant (Unpaid)</h3>
+                    <p class="text-lg accent-text">Ankara University Linguistics Laboratory</p>
+                    <p class="text-sm text-gray-500 mb-4">2018 - May 2021</p>
+                    <p class="text-gray-700">Supported psycholinguistic research, including data collection and experiment design, strengthening research skills.</p>
+                </div>
+                
+                <!-- Part-Time Instructor -->
+                <div class="card p-6 experience-item">
+                    <h3 class="text-xl font-semibold text-[#1e3a8a]">Part Time Instructor</h3>
+                    <p class="text-lg accent-text">Hacettepe University Department of Foreign Languages</p>
+                    <p class="text-sm text-gray-500 mb-4">Sep 2017 - Jun 2018</p>
+                    <p class="text-gray-700">Gained initial experience in higher education teaching English as a foreign language.</p>
+                </div>
+
+            </div>
+        </section>
+        
+        <hr class="border-gray-300 my-16">
+
+        <!-- 5. Research & Academics Section (Moved down) -->
+        <section id="research" class="mb-24">
+            <h2 class="text-4xl font-bold section-header mb-12">Research & Academics</h2>
+
+            <!-- Interactive LLM Feature: Linguistic Term Explainer -->
+            <div class="card p-6 mb-12 bg-white border-t-4 border-[#06b6d4]">
+                <h3 class="text-2xl font-semibold text-[#1e3a8a] mb-4 flex items-center">
+                    Interactive Linguistic Explainer ✨
+                </h3>
+                <p class="text-gray-600 mb-4">
+                    As an expert in Applied Linguistics and Psycholinguistics, I offer insights into complex concepts. Use the tool below to get a concise, expert explanation for any linguistic term (e.g., "quantifier ambiguity," "prosody," "syntax").
+                </p>
+                
+                <div class="flex flex-col sm:flex-row space-y-3 sm:space-y-0 sm:space-x-3 mb-4">
+                    <input type="text" id="linguisticTermInput" placeholder="Enter a linguistic term, e.g., 'lexical ambiguity'"
+                        class="flex-grow p-3 border border-gray-300 rounded-md focus:outline-none focus:ring-2 focus:ring-[#06b6d4] transition duration-150">
+                    
+                    <button id="explainButton" onclick="explainLinguisticTerm()"
+                            class="bg-[#06b6d4] text-white px-6 py-3 rounded-md font-semibold hover:bg-opacity-90 transition duration-300 shadow-lg flex-shrink-0 disabled:opacity-50">
+                        ✨ Explain Term
+                    </button>
+                </div>
+
+                <!-- Result Area -->
+                <div id="linguisticExplanation" class="mt-4">
+                    <p class="text-gray-500 text-sm">Your explanation will appear here.</p>
+                </div>
+            </div>
+            <!-- End Interactive Feature -->
+
+            <div class="grid grid-cols-1 lg:grid-cols-3 gap-10">
+                
+                <!-- Education Card -->
+                <div class="lg:col-span-1 space-y-6">
+                    <h3 class="text-2xl font-semibold text-[#1e3a8a] mb-4">Education</h3>
+                    <div class="card p-6 space-y-4">
+                        <div class="border-b pb-4">
+                            <p class="text-lg font-bold">MA in Linguistics</p>
+                            <p class="accent-text">Ankara University</p>
+                            <p class="text-sm text-gray-500">2017 - 2020</p>
+                            <p class="text-sm italic mt-2">Thesis: Syntactic and prosodic effects on processing of Turkish quantifiers</p>
+                        </div>
+                        <div class="border-b pb-4">
+                            <p class="text-lg font-bold">Special Student in Cognitive Science</p>
+                            <p class="accent-text">Middle Eastern Technical University (METU)</p>
+                            <p class="text-sm text-gray-500">Fall, 2019</p>
+                        </div>
+                        <div>
+                            <p class="text-lg font-bold">BA in English Linguistics</p>
+                            <p class="accent-text">Hacettepe University</p>
+                            <p class="text-sm text-gray-500">2012 - 2017</p>
+                        </div>
+                    </div>
+                    
+                    <h3 class="text-2xl font-semibold text-[#1e3a8a] mb-4 mt-6">Certifications & Honors</h3>
+                    <div class="card p-6 space-y-3">
+                        <p class="text-lg">Cambridge English **CELTA** Certificate (2024)</p>
+                        <p class="text-lg">Erasmus+ Exchange Grant (2018-2019)</p>
+                        <p class="text-lg">TÜBİTAK 1001 & 1002 Funding Program Scholarships</p>
+                    </div>
+                </div>
+
+                <!-- Publications & Talks Card -->
+                <div class="lg:col-span-1 space-y-6">
+                    <h3 class="text-2xl font-semibold text-[#1e3a8a] mb-4">Selected Output</h3>
+                    <div class="card p-6 space-y-5">
+                        <p class="font-bold text-gray-800">Key Peer-Reviewed Publication:</p>
+                        <p class="text-sm text-gray-700 italic border-l-4 border-[#06b6d4] pl-3">
+                            Kırcalı, C. E., Uzun, İ. P., & Aydın, Ö. (2021). Syntactic and prosodic processing of quantifier ambiguity in Turkish. 
+                            In Proceedings of the Workshop on Turkic and Languages in Contact with Turkic (Vol. 6, pp. 5066-5066).
+                        </p>
+                        <p class="font-bold text-gray-800 pt-3">Talks & Presentations:</p>
+                        <ul class="list-disc ml-5 space-y-2 text-gray-700">
+                            <li>Syntactic and Prosodic Processing of Quantifier Ambiguity in Turkish [Oral Presentation] – Sixth Workshop on Turkic and Languages in Contact with Turkic, 2021.</li>
+                            <li>Türkçede Odak Vurgusunun Niceleyicilere Etkisi [Oral Presentation] – 34. Ulusal Dilbilim Kurultayı, 2021.</li>
+                            <li>What are the effects of focus on quantifiers in Turkish: An evidence in the visual-world paradigm? [Oral Presentation] – 20th International Turkish Linguistics Conference, 2021.</li>
+                        </ul>
+                    </div>
+                </div>
+
+                <!-- Technical Skills Card -->
+                <div class="lg:col-span-1 space-y-6">
+                    <h3 class="text-2xl font-semibold text-[#1e3a8a] mb-4">Technical & Language Skills</h3>
+                    <div class="card p-6 space-y-5">
+                        <p class="font-bold text-gray-800">Research Software Proficiency:</p>
+                        <ul class="grid grid-cols-2 gap-x-4 gap-y-2 text-gray-700">
+                            <li class="flex items-center"><span class="accent-text mr-2">●</span> **PsychoPy** (Advanced)</li>
+                            <li class="flex items-center"><span class="accent-text mr-2">●</span> **Praat** (Advanced)</li>
+                            <li class="flex items-center"><span class="accent-text mr-2">●</span> **R** (Intermediate+)</li>
+                            <li class="flex items-center"><span class="accent-text mr-2">●</span> **EyeLink** Exp. Builder (Intermediate+)</li>
+                            <li class="flex items-center"><span class="accent-text mr-2">●</span> **LaTeX** (Basic)</li>
+                        </ul>
+                        
+                        <p class="font-bold text-gray-800 pt-3">Language Skills:</p>
+                        <ul class="grid grid-cols-2 gap-x-4 gap-y-2 text-gray-700">
+                            <li class="flex items-center"><span class="accent-text mr-2">●</span> **Turkish** (Native)</li>
+                            <li class="flex items-center"><span class="accent-text mr-2">●</span> **English** (Advanced)</li>
+                            <li class="flex items-center"><span class="accent-text mr-2">●</span> **German** (Beginner)</li>
+                        </ul>
+                    </div>
+                </div>
+
+            </div>
+        </section>
+
+    </main>
+
+    <!-- Footer / Contact Section -->
+    <footer id="contact" class="bg-[#1e3a8a] text-white py-12">
+        <div class="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8">
+            <h2 class="text-4xl font-bold section-header text-white mb-8 border-white">Get In Touch</h2>
+            <div class="grid grid-cols-1 md:grid-cols-3 gap-8">
+                
+                <!-- Contact Info -->
+                <div class="space-y-4">
+                    <p class="text-lg font-semibold text-[#06b6d4]">Contact Details</p>
+                    <div class="flex items-center space-x-2">
+                        <!-- Email Icon -->
+                        <svg xmlns="http://www.w3.org/2000/svg" width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" class="text-white"><path d="M4 4h16c1.1 0 2 .9 2 2v12c0 1.1-.9 2-2 2H4c-1.1 0-2-.9-2-2V6c0-1.1.9-2 2-2z"/><polyline points="22,6 12,13 2,6"/></svg>
+                        <a href="mailto:c.ecekircali@gmail.com" class="hover:text-[#06b6d4] transition duration-150">c.ecekircali@gmail.com</a>
+                    </div>
+                    <div class="flex items-center space-x-2">
+                        <!-- Location Icon -->
+                        <svg xmlns="http://www.w3.org/2000/svg" width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" class="text-white"><path d="M12 2C6.48 2 2 6.48 2 12s4.48 10 10 10 10-4.48 10-10S17.52 2 12 2zm0 14c-1.1 0-2-.9-2-2s.9-2 2-2 2 .9 2 2-.9 2-2 2z"/></svg>
+                        <p>Ankara, Turkey</p>
+                    </div>
+                </div>
+
+                <!-- References Note -->
+                <div class="md:col-span-2 space-y-4">
+                    <p class="text-lg font-semibold text-[#06b6d4]">References</p>
+                    <p class="text-gray-300">
+                        Professional references (Prof. Selçuk İşsever, Ass. Prof. İpek Pınar Uzun, Hande Işık Scott, PhD) are available upon request. Please contact me via email for a copy of my detailed CV and referee contact information.
+                    </p>
+                </div>
+            </div>
+
+            <div class="mt-8 pt-6 border-t border-gray-700 text-center text-sm text-gray-400">
+                &copy; 2025 Cemre Ece Kırcalı. All Rights Reserved.
+            </div>
+        </div>
+    </footer>
+
+</body>
+</html>
